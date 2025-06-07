@@ -1,0 +1,1331 @@
+# Facebook_comment_scraping_2025
+###########################################################################################################################################
+
+import time
+import random
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from datetime import datetime
+
+# Configuration
+EXCEL_PATH = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\sorted_facebook_urls.xlsx"
+OUTPUT_PATH = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\csv files\2025_url_comment_fetching.csv"
+
+def setup_driver():
+    """Initialize and return a configured Chrome WebDriver."""
+    options = Options()
+    # options.add_argument("--headless")  # Uncomment to run Chrome without GUI
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--log-level=3")
+    
+    # Window size randomization
+    width = random.randint(1200, 1920)
+    height = random.randint(800, 1080)
+    options.add_argument(f"--window-size={width},{height}")
+    
+    # User agent rotation
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ]
+    options.add_argument(f"user-agent={random.choice(user_agents)}")
+    
+    # Anti-bot evasion
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    
+    # Hide automation traces
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """
+    })
+    
+    return driver
+
+def random_delay(min_sec=1, max_sec=5):
+    """Add a random delay between actions."""
+    delay = random.uniform(min_sec, max_sec)
+    time.sleep(delay)
+    return delay
+
+def extract_comment_date(driver, comment_element):
+    """Extract the date/time of a comment."""
+    try:
+        for selector in [
+            ".//span[contains(@class, 'tojvnm2t')]",
+            ".//span[contains(@class, 'x4k7w5x')]",
+            ".//span[contains(@class, 'x1qvwoe0')]",
+            ".//span[@class='UFISutroCommentTimestamp']",
+            ".//abbr[contains(@class, 'timestamp')]",
+            ".//a[contains(@class, 'timestamp')]",
+            ".//a[contains(@href, 'comment_id')]",
+            ".//span[contains(text(), 'hr') or contains(text(), 'd') or contains(text(), 'min')]"
+        ]:
+            try:
+                time_el = comment_element.find_element(By.XPATH, selector)
+                timestamp = time_el.text.strip()
+                if timestamp:
+                    return timestamp
+            except:
+                continue
+        return "Unknown"
+    except Exception as e:
+        print(f"⚠️ Error extracting date: {e}")
+        return "Unknown"
+
+def expand_comments(driver, is_modal=False, max_attempts=20):
+    """Scroll to load all comments."""
+    if not is_modal:
+        return
+
+    try:
+        scroller = driver.execute_script("""
+            const dialog = document.querySelector('div[role="dialog"]');
+            if (!dialog) return null;
+            const scrollables = Array.from(dialog.querySelectorAll('div'))
+                .filter(div => div.scrollHeight > div.clientHeight + 100)
+                .sort((a,b) => b.scrollHeight - a.scrollHeight);
+            return scrollables.length > 0 ? scrollables[0] : null;
+        """)
+
+        if not scroller:
+            return
+
+        last_height = 0
+        same_height_count = 0
+        
+        for attempt in range(max_attempts):
+            scroll_top = driver.execute_script("return arguments[0].scrollTop", scroller)
+            scroll_height = driver.execute_script("return arguments[0].scrollHeight", scroller)
+            client_height = driver.execute_script("return arguments[0].clientHeight", scroller)
+            
+            if scroll_top + client_height >= scroll_height - 2:
+                break
+                
+            scroll_by = int(client_height * 0.8)
+            driver.execute_script("arguments[0].scrollTop += arguments[1]", scroller, scroll_by)
+            random_delay(1.5, 2.5)
+            
+            new_scroll_height = driver.execute_script("return arguments[0].scrollHeight", scroller)
+            if new_scroll_height == scroll_height:
+                same_height_count += 1
+                if same_height_count >= 3:
+                    break
+            else:
+                same_height_count = 0
+                
+    except Exception as e:
+        print(f"⚠️ Error during scrolling: {e}")
+
+def extract_comments(driver, url):
+    """Extract all comments and post description from a Facebook post."""
+    result = {
+        "post_description": None,
+        "comments": []
+    }
+    seen_comments = set()
+    
+    try:
+        print(f"🔗 Loading post: {url}")
+        driver.get(url)
+        random_delay(5, 7)
+        
+        is_modal = check_modal_layout(driver)
+        print(f"📱 Detected layout: {'Modal/Popup' if is_modal else 'Full Page'}")
+        
+        if "facebook.com/home" in driver.current_url or "facebook.com/?sk=h_chr" in driver.current_url:
+            print("⚠️ Redirected to home feed - attempting modal approach")
+            handle_redirect_to_modal(driver, url)
+            is_modal = True
+            random_delay(3, 5)
+        
+        switch_to_all_comments(driver, is_modal)
+        
+        if is_modal:
+            try:
+                modal = driver.find_element(By.XPATH, "//div[@role='dialog']")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", modal)
+                random_delay(1, 2)
+            except:
+                pass
+        else:
+            driver.execute_script("window.scrollBy(0, 300);")
+            random_delay(1, 2)
+        
+        expand_comments(driver, is_modal=True)
+        
+        try:
+            post_selectors = [
+                "//div[@role='dialog']//div[@data-ad-comet-preview='message']",
+                "//div[@role='dialog']//div[@data-ad-preview='message']",
+                "//div[@role='main']//div[@data-ad-comet-preview='message']",
+                "//div[@role='article']//div[@data-ad-comet-preview='message']"
+            ]
+            
+            for selector in post_selectors:
+                try:
+                    post_element = driver.find_element(By.XPATH, selector)
+                    result["post_description"] = post_element.text.strip()
+                    print(f"📝 Found post content: {result['post_description'][:50]}...")
+                    break
+                except:
+                    continue
+        except Exception as e:
+            print(f"⚠️ Error finding post content: {e}")
+        
+        all_comment_elements = []
+        comment_selectors = get_improved_comment_selectors(is_modal)
+        
+        for selector in comment_selectors:
+            try:
+                found = driver.find_elements(By.XPATH, selector)
+                if found:
+                    print(f"🔍 Found {len(found)} comments with selector: {selector}")
+                    all_comment_elements.extend(found)
+            except Exception as e:
+                print(f"⚠️ Error with selector {selector}: {e}")
+        
+        if not all_comment_elements:
+            try:
+                js_comments = driver.execute_script("""
+                    const container = document.querySelector('div[role="dialog"]') || document;
+                    const postContent = container.querySelector('div[data-ad-comet-preview="message"], div[data-ad-preview="message"]');
+                    return Array.from(container.querySelectorAll('div')).filter(div => {
+                        if (div === postContent) return false;
+                        const hasProfilePic = div.querySelector('img[src*="profile"]');
+                        const hasText = div.querySelectorAll('div[dir="auto"]').length > 0;
+                        const hasButtons = div.querySelectorAll('div[role="button"]').length >= 1;
+                        return hasProfilePic && hasText && hasButtons;
+                    });
+                """)
+                if js_comments:
+                    all_comment_elements.extend(js_comments)
+                    print(f"🔍 Found {len(js_comments)} additional comments with JavaScript")
+            except Exception as e:
+                print(f"⚠️ Error with JavaScript comment extraction: {e}")
+        
+        print(f"Processing {len(all_comment_elements)} potential comments")
+        for comment_element in all_comment_elements:
+            try:
+                username = extract_username(driver, comment_element)
+                comment_text = extract_comment_text(driver, comment_element)
+                comment_date = extract_comment_date(driver, comment_element)
+                
+                if (result["post_description"] and 
+                    result["post_description"].strip() == comment_text.strip()):
+                    continue
+                
+                comment_id = f"{username.lower()}:{hash(comment_text)}"
+                excluded_users = ["rishav sinha"]
+                
+                if (comment_id not in seen_comments and 
+                    username.lower() not in excluded_users and
+                    len(comment_text) >= 3):
+                    
+                    seen_comments.add(comment_id)
+                    result["comments"].append({
+                        "username": username,
+                        "comment": comment_text,
+                        "date": comment_date
+                    })
+                    print(f"✅ Added comment by {username} [{comment_date}]: {comment_text[:50]}...")
+                    
+            except Exception as e:
+                print(f"⚠️ Error processing comment: {str(e)[:50]}...")
+                continue
+        
+        print(f"✅ Successfully extracted {len(result['comments'])} unique comments")
+        
+    except Exception as e:
+        print(f"❌ Error in extract_comments: {e}")
+    
+    return result
+
+def get_improved_comment_selectors(is_modal=False):
+    """Return comment selectors."""
+    base_selectors = [
+        "//div[contains(@aria-label, 'Comment by') and ./parent::div/div[contains(@aria-label, 'Comment by')][2]]",
+    ]
+    
+    if is_modal:
+        modal_selectors = [
+            "//div[@role='dialog']//div[contains(@aria-label, 'Comment by')]",
+        ]
+        return modal_selectors + base_selectors
+    else:
+        full_page_selectors = [
+            "//div[@role='main']//div[.//img[contains(@src, 'profile')]][.//div[@role='button'][contains(., 'Like')]]",
+        ]
+        return base_selectors + full_page_selectors
+
+def switch_to_all_comments(driver, is_modal=False):
+    """Switch to 'All comments' view if available."""
+    try:
+        if is_modal:
+            dropdown_selectors = [
+                "//div[@role='dialog']//div[@role='button' and .//span[contains(., 'Most relevant')]]",
+                "//div[@role='dialog']//div[contains(@aria-haspopup, 'menu') and .//span[contains(., 'Most relevant')]]",
+                "//div[@role='dialog']//div[@role='button' and .//span[contains(., 'Sort')]]"
+            ]
+            
+            for selector in dropdown_selectors:
+                try:
+                    dropdown = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector)))
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown)
+                    driver.execute_script("arguments[0].click();", dropdown)
+                    random_delay(1, 1.5)
+                    
+                    all_comments_option = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, 
+                            "//div[@role='menu']//div[@role='menuitem']//span[contains(., 'All comments')]")))
+                    driver.execute_script("arguments[0].click();", all_comments_option)
+                    random_delay(2, 3)
+                    return True
+                except:
+                    continue
+            
+            return False
+            
+        else:
+            comment_section_selectors = [
+                "//span[contains(text(), 'comments')]",
+                "//a[contains(text(), 'comments')]",
+                "//span[contains(text(), 'Comments')]",
+                "//a[contains(text(), 'Comments')]"
+            ]
+            
+            for selector in comment_section_selectors:
+                try:
+                    comment_section = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector)))
+                    driver.execute_script("arguments[0].click();", comment_section)
+                    random_delay(1, 2)
+                    break
+                except:
+                    continue
+            
+            for dropdown_selector in [
+                "//span[text()='Most relevant']", 
+                "//span[contains(text(), 'Most relevant')]"
+            ]:
+                try:
+                    dropdown = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, dropdown_selector)))
+                    driver.execute_script("arguments[0].click();", dropdown)
+                    random_delay(1, 2)
+                    
+                    for option in [
+                        "//span[text()='All comments']",
+                        "//div[@role='menuitem' and contains(., 'All comments')]"
+                    ]:
+                        try:
+                            all_comments = WebDriverWait(driver, 5).until(
+                                EC.element_to_be_clickable((By.XPATH, option)))
+                            driver.execute_script("arguments[0].click();", all_comments)
+                            random_delay(2, 3)
+                            return True
+                        except:
+                            continue
+                except:
+                    continue
+    
+    except Exception as e:
+        print(f"⚠️ Could not switch to 'All comments' view: {e}")
+    
+    return False
+
+def check_modal_layout(driver):
+    """Check if the post is opened in a modal/popup rather than full page."""
+    try:
+        modal_indicators = [
+            "//div[@aria-label='Close']",
+            "//div[@role='dialog']",
+            "//div[contains(@style, 'max-width') and contains(@style, 'width') and contains(@class, 'x1n2onr6')]",
+            "//div[@aria-modal='true']"
+        ]
+        
+        for indicator in modal_indicators:
+            elements = driver.find_elements(By.XPATH, indicator)
+            if elements and any(el.is_displayed() for el in elements):
+                return True
+                
+        url = driver.current_url
+        is_modal_url = ("facebook.com/photo" in url or 
+                         "facebook.com/permalink" in url or 
+                         "fbid=" in url or 
+                         "photo.php" in url)
+        
+        is_feed_page = ("facebook.com/home" in url or 
+                        "facebook.com/?" in url or 
+                        url.endswith("facebook.com/"))
+        
+        return is_modal_url or is_feed_page
+        
+    except Exception as e:
+        print(f"⚠️ Error checking layout: {e}")
+        return False
+
+def handle_redirect_to_modal(driver, original_url):
+    """Handle case where URL redirects to home feed."""
+    try:
+        post_id = extract_post_id(original_url)
+        if post_id:
+            js_open_modal = f"""
+            try {{
+                if (window.location.href.includes('facebook.com')) {{
+                    if ('{original_url}'.includes('photo')) {{
+                        window.open('https://www.facebook.com/photo/?fbid={post_id}', '_self');
+                        return true;
+                    }}
+                    else {{
+                        window.open('https://www.facebook.com/permalink.php?story_fbid={post_id}', '_self');
+                        return true;
+                    }}
+                }}
+            }} catch (e) {{
+                return false;
+            }}
+            """
+            success = driver.execute_script(js_open_modal)
+            if success:
+                random_delay(3, 5)
+                return
+        
+        direct_url_attempts = [
+            f"https://www.facebook.com/photo/?fbid={post_id}",
+            f"https://www.facebook.com/permalink.php?story_fbid={post_id}",
+            original_url
+        ]
+        
+        for attempt_url in direct_url_attempts:
+            try:
+                driver.get(attempt_url)
+                random_delay(3, 5)
+                if check_modal_layout(driver):
+                    return
+            except:
+                continue
+                
+        driver.get(original_url)
+        random_delay(3, 5)
+        
+    except Exception as e:
+        print(f"❌ Error handling redirect: {e}")
+        driver.get(original_url)
+        random_delay(3, 5)
+
+def extract_post_id(url):
+    """Extract the post ID from URL."""
+    import re
+    patterns = [
+        r'facebook\.com/photo\.php\?fbid=(\d+)',
+        r'facebook\.com/photo/\?fbid=(\d+)',
+        r'fbid=(\d+)',
+        r'story_fbid=(\d+)',
+        r'posts/(\d+)',
+        r'permalink/(\d+)',
+        r'/(\d+)$'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def extract_username(driver, comment_element):
+    """Extract username from a comment element."""
+    try:
+        aria_label = comment_element.get_attribute('aria-label')
+        if aria_label and 'Comment by' in aria_label:
+            username = aria_label.replace('Comment by', '').strip()
+            if username:
+                return clean_username(username)
+        
+        for selector in [
+            ".//h3[contains(@class, 'x1heor9g')]//a",
+            ".//span[contains(@class, 'xt0psk2')]//a",
+            ".//h3//a",
+            ".//a[contains(@href, 'facebook.com/') and not(contains(@href, 'ufi'))]",
+            ".//span[contains(@class, 'x3nfvp2')]"
+        ]:
+            try:
+                name_el = comment_element.find_element(By.XPATH, selector)
+                username = name_el.text.strip()
+                if username:
+                    return clean_username(username)
+            except:
+                continue
+                
+        username = driver.execute_script("""
+            const el = arguments[0];
+            const nameLink = el.querySelector('h3 a, div[class*="x1heor9g"] a');
+            if (nameLink) return nameLink.textContent.trim();
+            const links = el.querySelectorAll('a');
+            for (const link of links) {
+                if (link.href && (link.href.includes('/user/') || 
+                    (link.href.includes('facebook.com/') && !link.href.includes('ufi')))) {
+                    return link.textContent.trim();
+                }
+            }
+            return '';
+        """, comment_element)
+        
+        if username:
+            return clean_username(username)
+                
+    except Exception as e:
+        pass
+        
+    return ""
+
+def clean_username(username):
+    """Clean username by removing common FB UI elements."""
+    if not username:
+        return ""
+        
+    username = username.split('·')[0].strip()
+    username = username.split(' Top fan')[0].strip()
+    username = username.split(' top fan')[0].strip()
+    
+    import re
+    username = re.sub(r'\s+\d+$', '', username)
+    username = re.sub(r'\s+\d+[dhwmy]$', '', username)
+    
+    return username.strip()
+
+def extract_comment_text(driver, comment_element):
+    """Extract and clean comment text."""
+    try:
+        for legacy_selector in [
+            ".//span[contains(@class, 'UFICommentBody')]",
+            ".//span[contains(@class, '_3l3x')]",
+            ".//span[contains(@class, '_5mdd')]"
+        ]:
+            try:
+                text_el = comment_element.find_element(By.XPATH, legacy_selector)
+                text = text_el.text.strip()
+                if text:
+                    return clean_comment_text(text)
+            except:
+                pass
+                
+        for selector in [
+            ".//div[@data-ad-comet-preview='message']",
+            ".//div[@data-ad-preview='message']"
+        ]:
+            try:
+                text_el = comment_element.find_element(By.XPATH, selector)
+                text = text_el.text.strip()
+                if text:
+                    return clean_comment_text(text)
+            except:
+                pass
+                
+        for selector in [
+            ".//div[@dir='auto' and not(.//div[@dir='auto'])]",
+            ".//div[contains(@class, 'xdj266r')]",
+            ".//div[contains(@class, 'x11i5rnm')]",
+            ".//p",
+            ".//*[self::p or self::span or self::div][contains(text(), ' ') and string-length() > 10]"
+        ]:
+            try:
+                text_elements = comment_element.find_elements(By.XPATH, selector)
+                text_elements.sort(key=lambda el: len(el.text), reverse=True)
+                
+                for el in text_elements:
+                    text = el.text.strip()
+                    if text and len(text) > 3:
+                        ui_indicators = ['Like', 'Reply', 'Share', 'See more', 'See translation', 'Report']
+                        if any(ui in text for ui in ui_indicators) and len(text) < 20:
+                            continue
+                        text = clean_comment_text(text)
+                        if text:
+                            return text
+            except:
+                continue
+        
+        text = driver.execute_script("""
+            const element = arguments[0];
+            function isUIText(text) {
+                if (!text) return true;
+                const uiPhrases = ['Like', 'Reply', 'Share', 'See more', 'See translation', 
+                                  'See less', 'Edited', 'Report', 'Unlike'];
+                return uiPhrases.some(phrase => text.includes(phrase)) && text.length < 25;
+            }
+            
+            const legacyTextElements = [
+                ...element.querySelectorAll('span.UFICommentBody'),
+                ...element.querySelectorAll('span._3l3x'),
+                ...element.querySelectorAll('span._5mdd'),
+                ...element.querySelectorAll('p')
+            ];
+            
+            for (const el of legacyTextElements) {
+                const text = el.textContent.trim();
+                if (text && text.length > 5 && !isUIText(text)) {
+                    return text;
+                }
+            }
+            
+            const adPreview = element.querySelector('div[data-ad-comet-preview="message"], div[data-ad-preview="message"]');
+            if (adPreview) {
+                return adPreview.textContent.trim();
+            }
+            
+            const textDivs = element.querySelectorAll('div[dir="auto"]');
+            if (textDivs.length) {
+                const textDivsArray = Array.from(textDivs)
+                    .filter(div => div.textContent.trim().length > 3)
+                    .sort((a, b) => b.textContent.length - a.textContent.length);
+                
+                for (const div of textDivsArray) {
+                    const text = div.textContent.trim();
+                    if (text && !isUIText(text)) {
+                        return text;
+                    }
+                }
+            }
+            
+            const uiElements = element.querySelectorAll('[role="button"], a');
+            const uiTexts = Array.from(uiElements)
+                .map(el => el.textContent.trim())
+                .filter(text => text.length > 0 && text.length < 30);
+            
+            let mainText = element.textContent.trim();
+            uiTexts.forEach(text => {
+                mainText = mainText.replace(text, '');
+            });
+                
+            return mainText.trim()
+                .replace(/\\s+/g, ' ')
+                .replace(/Like\\s*Reply\\s*Share/g, '')
+                .replace(/See more/g, '')
+                .replace(/See translation/g, '');
+        """, comment_element)
+        
+        if text:
+            return clean_comment_text(text)
+            
+    except:
+        pass
+        
+    return ""
+
+def clean_comment_text(text):
+    """Clean Facebook comment text."""
+    if not text:
+        return ""
+    
+    import re
+    ui_patterns = [
+        r'Like$', r'Reply$', r'Share$', r'Report$',
+        r'\d+m$', r'\d+h$', r'\d+d$', r'\d+w$',
+        r'Edited$', r'See more$', r'See less$', r'See translation$',
+        r'\b\d+ Repl(y|ies)\b', r'Top fan$'
+    ]
+    
+    cleaned = text
+    cleaned = re.sub(r'\b\d+\s*(hours|mins|days|weeks|seconds|minutes)\s*ago\b', '', cleaned)
+    cleaned = cleaned.replace(' · ', ' ').replace(' · ', ' ')
+    
+    for pattern in ui_patterns:
+        cleaned = re.sub(pattern, '', cleaned)
+    
+    cleaned = ' '.join(cleaned.split())
+    cleaned = cleaned.strip()
+    
+    if len(cleaned) < 3:
+        return ""
+        
+    return cleaned
+
+def main():
+    print("📋 Loading URLs from Excel...")
+    try:
+        df = pd.read_excel(EXCEL_PATH)
+        urls = df['permalink_url'].dropna().tolist()[164:756]
+        print(f"⚙️ Testing with {len(urls)} URL(s)")
+    except Exception as e:
+        print(f"❌ Error loading Excel file: {e}")
+        return
+
+    print("🚗 Setting up Chrome driver...")
+    driver = None
+    try:
+        request_count = 0
+        max_requests_per_session = random.randint(40, 80)
+        session_start_time = time.time()
+        session_duration = random.randint(1200, 1800)
+        
+        driver = setup_driver()
+        all_data = []
+        comment_counter = 0
+        save_interval = 10
+
+        for i, url in enumerate(urls):
+            print(f"\n[{i+1}/{len(urls)}] Processing: {url}")
+            request_count += 1
+
+            current_time = time.time()
+            if (request_count >= max_requests_per_session or 
+                (current_time - session_start_time) > session_duration):
+                print("🔄 Rotating session to avoid detection...")
+                driver.quit()
+                random_delay(30, 60)
+                driver = setup_driver()
+                request_count = 0
+                max_requests_per_session = random.randint(40, 80)
+                session_start_time = time.time()
+                session_duration = random.randint(1200, 1800)
+                random_delay(5, 10)
+
+            if i > 0:
+                delay = random_delay(5, 15)
+                print(f"⏱️ Waiting {delay:.2f}s before next request...")
+                time.sleep(delay)
+                
+                if random.random() < 0.1:
+                    long_break = random.randint(20, 30)
+                    print(f"☕ Taking a longer break of {long_break}s...")
+                    time.sleep(long_break)
+
+            try:
+                result = extract_comments(driver, url)
+                post_data = {
+                    "url": url,
+                    "post_description": result["post_description"] if result["post_description"] else "",
+                    "comments": []
+                }
+
+                for comment in result["comments"]:
+                    post_data["comments"].append({
+                        "username": comment["username"],
+                        "comment": comment["comment"],
+                        "date": comment["date"]
+                    })
+                    comment_counter += 1
+                    
+                    if comment_counter % save_interval == 0:
+                        print(f"💾 Saving progress after {comment_counter} comments...")
+                        flattened_data = []
+                        for post in all_data:
+                            for c in post["comments"]:
+                                flattened_data.append({
+                                    "url": post["url"],
+                                    "post_description": post["post_description"],
+                                    "username": c["username"],
+                                    "comment": c["comment"],
+                                    "date": c["date"]
+                                })
+                        
+                        try:
+                            existing_df = pd.read_csv(OUTPUT_PATH)
+                            updated_df = pd.concat([existing_df, pd.DataFrame(flattened_data[-save_interval:])])
+                            updated_df.to_csv(OUTPUT_PATH, index=False, encoding='utf-8-sig')
+                        except FileNotFoundError:
+                            pd.DataFrame(flattened_data).to_csv(OUTPUT_PATH, index=False, encoding='utf-8-sig')
+                        
+                        print(f"✅ Saved {len(flattened_data)} records so far")
+
+                all_data.append(post_data)
+
+                print(f"📋 Post summary for {url}:")
+                print(f"Description: {post_data['post_description'][:100]}..." if post_data['post_description'] else "No description found")
+                print(f"Comments found: {len(post_data['comments'])}")
+                if post_data["comments"]:
+                    print("Sample comments:")
+                    for j, comment in enumerate(post_data["comments"][:3]):
+                        preview = comment['comment'][:60] + "..." if len(comment['comment']) > 60 else comment['comment']
+                        print(f"{j+1}. {comment['username']} [{comment['date']}]: {preview}")
+
+                if random.random() > 0.7:
+                    scroll_amount = random.randint(200, 800)
+                    driver.execute_script(f"window.scrollBy(0, {scroll_amount})")
+                    random_delay(1, 3)
+
+            except Exception as e:
+                print(f"❌ Error processing URL {url}: {e}")
+                
+                if "blocked" in str(e).lower() or "captcha" in str(e).lower():
+                    print("🔴 Possible block detected - waiting 5-10 minutes")
+                    driver.quit()
+                    time.sleep(random.randint(300, 600))
+                    driver = setup_driver()
+                    request_count = 0
+                    session_start_time = time.time()
+                continue
+
+        print("💾 Saving all remaining data...")
+        flattened_data = []
+        for post in all_data:
+            for comment in post["comments"]:
+                flattened_data.append({
+                    "url": post["url"],
+                    "post_description": post["post_description"],
+                    "username": comment["username"],
+                    "comment": comment["comment"],
+                    "date": comment["date"]
+                })
+        
+        try:
+            existing_df = pd.read_csv(OUTPUT_PATH)
+            final_df = pd.concat([existing_df, pd.DataFrame(flattened_data)])
+            final_df.to_csv(OUTPUT_PATH, index=False, encoding='utf-8-sig')
+        except FileNotFoundError:
+            pd.DataFrame(flattened_data).to_csv(OUTPUT_PATH, index=False, encoding='utf-8-sig')
+
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+    finally:
+        if driver:
+            driver.quit()
+
+    print(f"\n✅ Scraping complete! Processed {len(all_data)} posts with {sum(len(p['comments']) for p in all_data)} total comments")
+    print(f"📁 Results saved to: {OUTPUT_PATH}")
+
+if __name__ == "__main__":
+    start_time = datetime.now()
+    print(f"⏱️ Starting scraper at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    initial_delay = random.randint(1, 2)
+    print(f"⏳ Random initial delay of {initial_delay}s...")
+    time.sleep(initial_delay)
+    main()
+    elapsed_time = datetime.now() - start_time
+    print(f"⏱️ Scraping completed in {elapsed_time}")
+
+
+
+######################################################################################################################################
+Sentiment Analysis
+#######################################################################################################################################
+
+import pandas as pd
+import numpy as np
+import unicodedata
+import torch
+import logging
+import os
+import re
+from tqdm import tqdm
+from sentence_transformers import SentenceTransformer, util
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM
+from langdetect import detect, LangDetectException
+
+# ------------------ Setup Logging ------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ------------------ Paths ------------------
+INPUT_FILE_PATH = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\csv files\2025_url_comment_fetching.csv"
+TOPICS_FILE_PATH = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\csv files\topic_categorisation.txt"
+OUTPUT_FILE_PATH = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\csv files\comments_sentiment_topic.csv"
+
+# ------------------ Load Topics ------------------
+def load_topics_from_file(file_path):
+    with open(file_path, 'r', encoding='utf-8') as file:
+        content = file.read()
+        dict_start = content.find('{')
+        dict_end = content.rfind('}') + 1
+        dict_content = content[dict_start:dict_end]
+        topics_dict = eval(dict_content)
+    return topics_dict
+
+# ------------------ Load Data ------------------
+def load_data(file_path):
+    encodings_to_try = ['utf-8-sig', 'utf-8', 'ISO-8859-1']
+    for enc in encodings_to_try:
+        try:
+            with open(file_path, 'r', encoding=enc, errors='replace') as f:
+                df = pd.read_csv(f)
+            logger.info(f"✅ Loaded CSV using encoding: {enc}")
+            break
+        except UnicodeDecodeError:
+            logger.warning(f"⚠️ Failed to load with encoding: {enc}")
+    else:
+        raise UnicodeDecodeError("❌ Unable to decode file using tried encodings.")
+
+    df.drop_duplicates(inplace=True)
+    df.columns = [col.lower().strip() for col in df.columns]
+    
+    # Ensure required columns exist
+    required_columns = ['url', 'username', 'comment']
+    existing_columns = df.columns.tolist()
+    
+    # Check if required columns exist with different names
+    for req_col in required_columns:
+        if req_col not in existing_columns:
+            # Look for similar column names
+            for col in existing_columns:
+                if req_col in col:
+                    df.rename(columns={col: req_col}, inplace=True)
+                    logger.info(f"📋 Renamed column '{col}' to '{req_col}'")
+                    break
+    
+    # If comment column still not found, use the first column
+    if 'comment' not in df.columns:
+        df.rename(columns={df.columns[0]: 'comment'}, inplace=True)
+    
+    # Check if url and username columns exist, if not create empty ones
+    if 'url' not in df.columns:
+        logger.warning("⚠️ 'url' column not found in input file, creating empty column")
+        df['url'] = ""
+    
+    if 'username' not in df.columns:
+        logger.warning("⚠️ 'username' column not found in input file, creating empty column")
+        df['username'] = ""
+
+    df['comment'] = df['comment'].astype(str).fillna("")
+    return df
+
+
+# ------------------ Topic Embeddings ------------------
+def compute_all_example_embeddings(model, topics_dict):
+    topic_examples = []
+    topic_labels = []
+    for topic, examples in topics_dict.items():
+        for example in examples:
+            topic_examples.append(example)
+            topic_labels.append(topic)
+
+    logger.info(f"🧠 Encoding {len(topic_examples)} topic examples...")
+    example_embeddings = model.encode(topic_examples, batch_size=32, convert_to_tensor=True)
+    return topic_examples, topic_labels, example_embeddings
+
+def match_comment_to_topic(comment, model, topic_labels, example_embeddings, threshold=0.6):
+    if not comment.strip():
+        return "General Comment", 0.0
+
+    comment_embedding = model.encode(comment, convert_to_tensor=True)
+    cos_scores = util.cos_sim(comment_embedding, example_embeddings)[0]
+    top_index = torch.argmax(cos_scores).item()
+    top_score = cos_scores[top_index].item()
+
+    if top_score >= threshold:
+        return topic_labels[top_index], round(top_score, 3)
+    else:
+        return "General Comment", round(top_score, 3)
+
+# ------------------ Text Normalization & Cleanup ------------------
+def normalize_text(text):
+    """Normalize Unicode characters to NFC form"""
+    return unicodedata.normalize("NFC", text) if isinstance(text, str) else ""
+
+def clean_translation(text):
+    """Clean up common translation artifacts"""
+    if not isinstance(text, str):
+        return ""
+    
+    # Remove excessive spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Fix common artifacts
+    text = re.sub(r'\.{2,}', '...', text)  # Standardize ellipses
+    text = re.sub(r' ', '', text)  # Remove replacement character
+    text = re.sub(r'\( *\)', '', text)  # Remove empty parentheses
+    text = re.sub(r'\[ *\]', '', text)  # Remove empty brackets
+    text = re.sub(r'\s+([.,!?;:])', r'\1', text)  # Fix spacing before punctuation
+    
+    # Fix double punctuation
+    text = re.sub(r'([.,!?;:]){2,}', r'\1', text)
+    
+    return text.strip()
+
+# ------------------ Script Detection ------------------
+SCRIPT_PATTERNS = {
+    'bengali': r'[\u0980-\u09FF\u09BC\u09BE-\u09CC\u09CD\u09D7]',
+    'devanagari': r'[\u0900-\u097F\uA8E0-\uA8FF\u1CD0-\u1CFF]',
+    'gurmukhi': r'[\u0A00-\u0A7F]',
+    'gujarati': r'[\u0A80-\u0AFF]',
+    'oriya': r'[\u0B00-\u0B7F]',
+    'tamil': r'[\u0B80-\u0BFF]',
+    'telugu': r'[\u0C00-\u0C7F]',
+    'kannada': r'[\u0C80-\u0CFF]',
+    'malayalam': r'[\u0D00-\u0D7F]'
+}
+
+def detect_scripts(text):
+    """Detect all scripts present in text"""
+    if not isinstance(text, str) or not text.strip():
+        return set()
+    
+    detected_scripts = set()
+    for script, pattern in SCRIPT_PATTERNS.items():
+        if re.search(pattern, text):
+            detected_scripts.add(script)
+            
+    # Check for Latin script (English/Roman letters)
+    if re.search(r'[a-zA-Z]', text):
+        detected_scripts.add('latin')
+        
+    return detected_scripts
+
+def get_primary_script(text):
+    """Get the primary script used in text"""
+    scripts = detect_scripts(text)
+    
+    # No script detected
+    if not scripts:
+        return 'unknown'
+    
+    # Find the script with the most characters
+    script_counts = {}
+    for script in scripts:
+        if script == 'latin':
+            script_counts[script] = len(re.findall(r'[a-zA-Z]', text))
+        else:
+            pattern = SCRIPT_PATTERNS.get(script, '')
+            script_counts[script] = len(re.findall(pattern, text))
+    
+    primary_script = max(script_counts.items(), key=lambda x: x[1])[0]
+    return primary_script
+
+# ------------------ Language Detection with Script Awareness ------------------
+SCRIPT_TO_LANG = {
+    'devanagari': 'hi',  # Hindi
+    'bengali': 'bn',     # Bengali
+    'tamil': 'ta',       # Tamil
+    'telugu': 'te',      # Telugu
+    'kannada': 'kn',     # Kannada
+    'malayalam': 'ml',   # Malayalam
+    'gurmukhi': 'pa',    # Punjabi
+    'gujarati': 'gu',    # Gujarati
+    'oriya': 'or',       # Oriya/Odia
+}
+
+def detect_lang(text):
+    """Detect language with script awareness and fallbacks"""
+    if not isinstance(text, str) or not text.strip():
+        return 'unknown'
+    
+    # Get primary script 
+    primary_script = get_primary_script(text)
+    
+    # If it's a known Indian script, use the script for language detection
+    if primary_script in SCRIPT_TO_LANG:
+        return SCRIPT_TO_LANG[primary_script]
+    
+    # Try langdetect for latin script or mixed text
+    try:
+        # For mixed scripts containing Indian language in Latin script
+        if 'latin' in detect_scripts(text) and len(detect_scripts(text)) > 1:
+            # Check for common Hindi/Indian words in Latin script
+            common_indian_words = ['namaste', 'acha', 'theek', 'bahut', 'kadam', 'shubh', 'desi', 
+                                   'dhan', 'dhanyavad', 'namaskar', 'shukriya']
+            
+            text_lower = text.lower()
+            for word in common_indian_words:
+                if word in text_lower:
+                    logger.info(f"🔍 Detected Hindi-in-Latin: '{word}' in '{text[:50]}...'")
+                    return 'hi'  # Treat as Hindi written in Latin script
+        
+        # Fall back to regular language detection
+        return detect(text)
+    except LangDetectException:
+        return 'unknown'
+
+# ------------------ Enhanced Translation ------------------
+LANG_MAP = {
+    'hi': 'hin_Deva',  # Hindi
+    'bn': 'ben_Beng',  # Bengali
+    'ta': 'tam_Taml',  # Tamil
+    'te': 'tel_Telu',  # Telugu
+    'ml': 'mal_Mlym',  # Malayalam
+    'gu': 'guj_Gujr',  # Gujarati
+    'kn': 'kan_Knda',  # Kannada
+    'mr': 'mar_Deva',  # Marathi
+    'pa': 'pan_Guru',  # Punjabi
+    'or': 'ory_Orya',  # Odia/Oriya
+    'en': 'eng_Latn',  # English
+    'ur': 'urd_Arab',  # Urdu
+    'unknown': 'eng_Latn',  # Default to English for unknown
+}
+
+def preprocess_mixed_script(text):
+    """Handle mixed script text, especially Hindi written in Latin"""
+    scripts = detect_scripts(text)
+    
+    # If multiple scripts including Latin and an Indian script
+    if len(scripts) > 1 and 'latin' in scripts:
+        # For now, just log the detection - more complex handling could be added later
+        logger.info(f"🔄 Mixed script text detected: '{text[:50]}...'")
+    
+    return text
+
+def batch_translate(comments, tokenizer, model, batch_size=16):
+    """Translate comments in batches for efficiency"""
+    all_translations = []
+    
+    # Process in batches
+    for i in range(0, len(comments), batch_size):
+        batch = comments[i:i+batch_size]
+        batch_translations = []
+        
+        # Preprocess and determine language for each comment in batch
+        preprocessed_batch = []
+        src_langs = []
+        
+        for comment in batch:
+            comment = normalize_text(comment)
+            comment = preprocess_mixed_script(comment)
+            lang = detect_lang(comment)
+            
+            preprocessed_batch.append(comment)
+            src_langs.append(lang)
+        
+        # Translate each comment in batch
+        for j, (comment, lang) in enumerate(zip(preprocessed_batch, src_langs)):
+            if lang == 'en' or not comment.strip():
+                batch_translations.append(comment)
+                continue
+                
+            src_lang_code = LANG_MAP.get(lang, 'eng_Latn')
+            tgt_lang_code = 'eng_Latn'
+            
+            try:
+                tokenizer.src_lang = src_lang_code
+                inputs = tokenizer(comment, return_tensors="pt", truncation=True, max_length=512)
+                
+                translated_tokens = model.generate(
+                    **inputs,
+                    forced_bos_token_id = tokenizer(tgt_lang_code, add_special_tokens=False).input_ids[0],
+                    max_length=512,
+                    num_beams=5,
+                    early_stopping=True
+                )
+                
+                translated = tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)[0].strip()
+                translated = clean_translation(translated)
+                
+                if not translated or " " in translated:
+                    logger.warning(f"⚠️ Bad translation output for '{comment[:30]}...' from {lang}")
+                    batch_translations.append(comment)  # Fall back to original
+                else:
+                    batch_translations.append(translated)
+                    
+            except Exception as e:
+                logger.warning(f"❌ Translation failed: {type(e).__name__}: {str(e)[:100]}")
+                batch_translations.append(comment)  # Fall back to original
+        
+        all_translations.extend(batch_translations)
+    
+    return all_translations
+
+# ------------------ Sentiment Analysis ------------------
+def analyze_sentiment(text, tokenizer, model):
+    if not isinstance(text, str) or text.strip() == "":
+        return 'neutral', 0.0
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    probs = torch.nn.functional.softmax(outputs.logits, dim=1)[0]
+    max_idx = torch.argmax(probs).item()
+    sentiment_labels = ['negative', 'neutral', 'positive']
+    return sentiment_labels[max_idx], round(probs[max_idx].item(), 3)
+
+def batch_analyze_sentiment(texts, tokenizer, model, batch_size=32):
+    """Analyze sentiment in batches for efficiency"""
+    results = []
+    
+    # Process in batches
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        batch_sentiments = []
+        batch_scores = []
+        
+        # Skip empty texts
+        valid_indices = []
+        valid_texts = []
+        for j, text in enumerate(batch):
+            if isinstance(text, str) and text.strip() != "":
+                valid_indices.append(j)
+                valid_texts.append(text)
+        
+        if not valid_texts:
+            # Add neutral sentiment for all empty texts
+            batch_sentiments = ['neutral'] * len(batch)
+            batch_scores = [0.0] * len(batch)
+        else:
+            # Process valid texts
+            inputs = tokenizer(valid_texts, return_tensors='pt', truncation=True, 
+                              padding=True, max_length=512)
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+            
+            probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+            max_indices = torch.argmax(probs, dim=1)
+            
+            sentiment_labels = ['negative', 'neutral', 'positive']
+            
+            # Initialize with neutral for all
+            batch_sentiments = ['neutral'] * len(batch)
+            batch_scores = [0.0] * len(batch)
+            
+            # Update only valid positions
+            for idx, valid_idx in enumerate(valid_indices):
+                sentiment_idx = max_indices[idx].item()
+                batch_sentiments[valid_idx] = sentiment_labels[sentiment_idx]
+                batch_scores[valid_idx] = round(probs[idx, sentiment_idx].item(), 3)
+        
+        results.extend(list(zip(batch_sentiments, batch_scores)))
+    
+    return results
+
+# ------------------ Main ------------------
+def main():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"🚀 Starting comment classification using device: {device}")
+    
+    # Define path for summary text file (same directory as OUTPUT_FILE_PATH)
+    summary_file_path = os.path.join(os.path.dirname(OUTPUT_FILE_PATH), "analysis_summary.txt")
+
+    # Load models
+    logger.info("📚 Loading models...")
+    topic_model = SentenceTransformer('all-MiniLM-L6-v2').to(device)
+    
+    logger.info("📚 Loading translation model (NLLB-200-distilled-600M)...")
+    translation_tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
+    translation_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
+    
+    logger.info("📚 Loading sentiment model...")
+    sentiment_tokenizer = AutoTokenizer.from_pretrained("cardiffnlp/twitter-xlm-roberta-base-sentiment")
+    sentiment_model = AutoModelForSequenceClassification.from_pretrained("cardiffnlp/twitter-xlm-roberta-base-sentiment")
+
+    # Load topics & data
+    logger.info("📂 Loading topics and data...")
+    topics_dict = load_topics_from_file(TOPICS_FILE_PATH)
+    topic_examples, topic_labels, example_embeddings = compute_all_example_embeddings(
+        topic_model, topics_dict
+    )
+    df = load_data(INPUT_FILE_PATH)
+
+    # Extract comments
+    comments = df['comment'].tolist()
+    # Extract URLs and usernames
+    urls = df['url'].tolist()
+    usernames = df['username'].tolist()
+    
+    total_comments = len(comments)
+    logger.info(f"📦 Processing {total_comments} comments...")
+
+    # Step 1: Translate comments in batches
+    logger.info("🔄 Translating comments in batches...")
+    translated_comments = batch_translate(
+        comments, translation_tokenizer, translation_model, batch_size=16
+    )
+    
+    # Step 2: Analyze sentiment in batches
+    logger.info("😊 Analyzing sentiment in batches...")
+    sentiment_results = batch_analyze_sentiment(
+        translated_comments, sentiment_tokenizer, sentiment_model, batch_size=32
+    )
+    
+    # Step 3: Match comments to topics (this is already efficient)
+    logger.info("🏷️ Categorizing topics...")
+    topic_results = []
+    for translated in tqdm(translated_comments, desc="Matching topics"):
+        topic, topic_score = match_comment_to_topic(
+            translated, topic_model, topic_labels, example_embeddings, threshold=0.6
+        )
+        topic_results.append((topic, topic_score))
+    
+    # Combine results into dataframe with URL and username
+    logger.info("🔄 Combining results...")
+    result_df = pd.DataFrame({
+        'url': urls,
+        'username': usernames,
+        'comment': comments,
+        'translated_comment': translated_comments,
+        'topic_categorisation': [tr[0] for tr in topic_results],
+        'topic_confidence': [tr[1] for tr in topic_results],
+        'sentiment': [sr[0] for sr in sentiment_results],
+        'sentiment_score': [sr[1] for sr in sentiment_results]
+    })
+    
+    # Save results to CSV
+    result_df.to_csv(OUTPUT_FILE_PATH, index=False, encoding='utf-8-sig')
+    logger.info(f"✨ Final output saved to: {OUTPUT_FILE_PATH} (UTF-8 with BOM)")
+    
+    # Generate detailed summary statistics
+    topic_counts = result_df['topic_categorisation'].value_counts().to_dict()
+    sentiment_counts = result_df['sentiment'].value_counts().to_dict()
+    
+    # Format topic counts in readable format
+    topic_counts_formatted = ", ".join([f"{topic}:{count}" for topic, count in topic_counts.items()])
+    sentiment_counts_formatted = ", ".join([f"{sentiment}:{count}" for sentiment, count in sentiment_counts.items()])
+    
+    # Create summary content
+    summary_content = [
+        "===============================================",
+        "                 ANALYSIS SUMMARY              ",
+        "===============================================",
+        f"Date & Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Input File: {os.path.basename(INPUT_FILE_PATH)}",
+        f"Output File: {os.path.basename(OUTPUT_FILE_PATH)}",
+        "-----------------------------------------------",
+        f"Total Comments Processed: {total_comments}",
+        "-----------------------------------------------",
+        "TOPIC CATEGORISATION RESULTS:",
+        topic_counts_formatted,
+        "-----------------------------------------------",
+        "SENTIMENT ANALYSIS RESULTS:",
+        sentiment_counts_formatted,
+        "-----------------------------------------------",
+        "DETAILED TOPIC BREAKDOWN:",
+    ]
+    
+    # Add detailed topic breakdown
+    for topic, count in sorted(topic_counts.items(), key=lambda x: x[1], reverse=True):
+        percentage = (count / total_comments) * 100
+        summary_content.append(f"- {topic}: {count} comments ({percentage:.1f}%)")
+    
+    summary_content.append("-----------------------------------------------")
+    summary_content.append("DETAILED SENTIMENT BREAKDOWN:")
+    
+    # Add detailed sentiment breakdown
+    for sentiment, count in sorted(sentiment_counts.items(), key=lambda x: x[1], reverse=True):
+        percentage = (count / total_comments) * 100
+        summary_content.append(f"- {sentiment}: {count} comments ({percentage:.1f}%)")
+    
+    summary_content.append("===============================================")
+    
+    # Save summary to text file
+    with open(summary_file_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(summary_content))
+    
+    logger.info(f"📊 Summary statistics saved to: {summary_file_path}")
+    
+    # Print summary to console
+    logger.info("📊 Processing Summary:")
+    logger.info(f"   - Total comments processed: {total_comments}")
+    logger.info(f"   - Topic distribution: {topic_counts_formatted}")
+    logger.info(f"   - Sentiment distribution: {sentiment_counts_formatted}")
+
+if __name__ == "__main__":
+    main()

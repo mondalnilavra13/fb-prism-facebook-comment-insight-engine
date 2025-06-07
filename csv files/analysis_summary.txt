@@ -1,0 +1,36 @@
+===============================================
+                 ANALYSIS SUMMARY              
+===============================================
+Date & Time: 2025-05-17 15:56:27
+Input File: 2025_url_comment_fetching.csv
+Output File: comments_sentiment_topic.csv
+-----------------------------------------------
+Total Comments Processed: 2785
+-----------------------------------------------
+TOPIC CATEGORISATION RESULTS:
+Other / Unclassified:2742, mobile app issues:15, KYC / CKYC issues:10, debit card issues:3, customer service / branch experience:2, IMPS / NEFT / RTGS issues:2, internet banking issues:2, banking service information:2, account opening issues:2, fraud / unauthorized transaction:1, pension / benefit credit issues:1, credit card issues:1, loan / EMI issues:1, fixed deposit / recurring deposit issues:1
+-----------------------------------------------
+SENTIMENT ANALYSIS RESULTS:
+positive:1294, neutral:1210, negative:281
+-----------------------------------------------
+DETAILED TOPIC BREAKDOWN:
+- Other / Unclassified: 2742 comments (98.5%)
+- mobile app issues: 15 comments (0.5%)
+- KYC / CKYC issues: 10 comments (0.4%)
+- debit card issues: 3 comments (0.1%)
+- customer service / branch experience: 2 comments (0.1%)
+- IMPS / NEFT / RTGS issues: 2 comments (0.1%)
+- internet banking issues: 2 comments (0.1%)
+- banking service information: 2 comments (0.1%)
+- account opening issues: 2 comments (0.1%)
+- fraud / unauthorized transaction: 1 comments (0.0%)
+- pension / benefit credit issues: 1 comments (0.0%)
+- credit card issues: 1 comments (0.0%)
+- loan / EMI issues: 1 comments (0.0%)
+- fixed deposit / recurring deposit issues: 1 comments (0.0%)
+-----------------------------------------------
+DETAILED SENTIMENT BREAKDOWN:
+- positive: 1294 comments (46.5%)
+- neutral: 1210 comments (43.4%)
+- negative: 281 comments (10.1%)
+===============================================

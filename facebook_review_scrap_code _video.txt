@@ -1,0 +1,782 @@
+import time
+import json
+import re
+import random
+import pandas as pd
+import warnings
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+
+warnings.filterwarnings("ignore")  # Clean log output
+
+# === Step 1: Load URLs from Excel ===
+
+excel_path = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping\video_url.xlsx"
+df = pd.read_excel(excel_path)
+urls = df['permalink_url'].dropna().tolist()
+urls = urls[2:]  # Optional: limit for testing
+
+# === Step 2: Setup Selenium Chrome Driver ===
+
+options = Options()
+options.add_argument("--headless")  # Run in headless mode
+options.add_argument("--no-sandbox")  # Bypass OS security model
+options.add_argument("--disable-gpu")  # Disable GPU hardware acceleration
+options.add_argument("--window-size=1920,1080")  # Set window size
+options.add_argument("--start-maximized")
+options.add_argument("--disable-notifications")
+options.add_argument("--disable-popup-blocking")
+options.add_argument("--disable-infobars")
+options.add_experimental_option("excludeSwitches", ["enable-automation"])
+options.add_experimental_option("useAutomationExtension", False)
+
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+# === Random delay function ===
+
+def random_delay(min_sec=1, max_sec=3):
+    """Add a random delay between actions to appear more human-like"""
+    delay = random.uniform(min_sec, max_sec)
+    time.sleep(delay)
+    return delay
+
+# === Retry function with exponential backoff ===
+
+def retry_function(func, max_retries=3, *args, **kwargs):
+    """Retry a function with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except (StaleElementReferenceException, NoSuchElementException) as e:
+            # Shorter wait for element-related exceptions
+            wait_time = 1 + random.uniform(0, 1)
+            if attempt < max_retries - 1:
+                print(f"⚠️ Element-related error on attempt {attempt+1}: {e}. Retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ All {max_retries} attempts failed for {func.__name__}")
+                raise e
+        except Exception as e:
+            # Longer wait for other exceptions
+            wait_time = 2 ** attempt + random.uniform(0, 1)
+            if attempt < max_retries - 1:
+                print(f"⚠️ Attempt {attempt+1} failed: {e}. Retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ All {max_retries} attempts failed for {func.__name__}")
+                raise e
+
+# === Function to convert relative dates ===
+
+def convert_relative_date(date_str):
+    """Convert relative date strings to actual dates"""
+    today = datetime.now()
+
+    if not date_str:
+        return ""
+
+    # Handle "Yesterday"
+    if "Yesterday" in date_str:
+        yesterday = today - timedelta(days=1)
+        return yesterday.strftime("%b %d, %Y")
+
+    # Handle "Today"
+    if "Today" in date_str:
+        return today.strftime("%b %d, %Y")
+
+    # Handle "X hours ago", "X minutes ago", etc.
+    time_ago_match = re.search(r'(\d+)\s*(hour|hr|h|minute|min|m|day|d|week|w|month|year|yr|y)s?\s*ago', date_str, re.IGNORECASE)
+    if time_ago_match:
+        amount = int(time_ago_match.group(1))
+        unit = time_ago_match.group(2).lower()
+        
+        if unit in ['hour', 'hr', 'h']:
+            date = today - timedelta(hours=amount)
+        elif unit in ['minute', 'min', 'm']:
+            date = today - timedelta(minutes=amount)
+        elif unit in ['day', 'd']:
+            date = today - timedelta(days=amount)
+        elif unit in ['week', 'w']:
+            date = today - timedelta(weeks=amount)
+        elif unit in ['month']:
+            # Approximation
+            date = today - timedelta(days=amount*30)
+        elif unit in ['year', 'yr', 'y']:
+            # Approximation
+            date = today - timedelta(days=amount*365)
+        else:
+            return date_str
+            
+        return date.strftime("%b %d, %Y")
+
+    # Handle "X h", "X m", "X d" format
+    short_time_match = re.search(r'(\d+)\s*(h|m|d|w)', date_str, re.IGNORECASE)
+    if short_time_match:
+        amount = int(short_time_match.group(1))
+        unit = short_time_match.group(2).lower()
+        
+        if unit == 'h':
+            date = today - timedelta(hours=amount)
+        elif unit == 'm':
+            date = today - timedelta(minutes=amount)
+        elif unit == 'd':
+            date = today - timedelta(days=amount)
+        elif unit == 'w':
+            date = today - timedelta(weeks=amount)
+        else:
+            return date_str
+            
+        return date.strftime("%b %d, %Y")
+
+    # If it's already a date format, return as is
+    return date_str
+
+# === Step 3: Expand and Switch to All Comments ===
+
+def expand_comments(driver, max_attempts=50):
+    attempts = 0
+    while attempts < max_attempts:
+        try:
+            # Click on See More buttons in post content and comments
+            see_more = driver.find_elements(By.XPATH,
+                "//div[@role='button' and (contains(., 'See more') or text()='See more')]")
+
+            for btn in see_more:
+                try:
+                    if btn.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                        random_delay(0.5, 1.5)
+                        driver.execute_script("arguments[0].click();", btn)
+                        random_delay(0.5, 1.5)
+                except Exception:
+                    pass
+
+            # Look for view more comments buttons
+            more_buttons = driver.find_elements(By.XPATH,
+                "//span[contains(text(), 'View more comments') or contains(text(), 'View') or contains(text(), 'previous comments')]")
+            
+            if not more_buttons:
+                # Scroll to load more content
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                random_delay(1.5, 3)
+                more_buttons = driver.find_elements(By.XPATH,
+                    "//span[contains(text(), 'View more comments') or contains(text(), 'View') or contains(text(), 'previous comments')]")
+                
+                if not more_buttons:
+                    # Look for alternative indicators that we need to expand
+                    expand_replies = driver.find_elements(By.XPATH, "//span[contains(text(), 'replies')]")
+                    if not expand_replies:
+                        break
+                    for reply_btn in expand_replies:
+                        if reply_btn.is_displayed():
+                            try:
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", reply_btn)
+                                random_delay(0.5, 1.5)
+                                driver.execute_script("arguments[0].click();", reply_btn)
+                                random_delay(1.5, 3)
+                            except:
+                                pass
+
+            for btn in more_buttons:
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                    random_delay(0.5, 1.5)
+                    driver.execute_script("arguments[0].click();", btn)
+                    random_delay(2, 4)
+                    break
+
+            attempts += 1
+        except Exception as e:
+            attempts += 1
+            print(f"Expand comments error (attempt {attempts}): {str(e)}")
+            random_delay(1, 2)
+
+def switch_to_all_comments(driver, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            selectors = [
+                "//span[text()='Most relevant']",
+                "//span[contains(text(), 'Most relevant')]",
+                "//div[@role='button' and contains(., 'Relevant comments')]",
+                "//div[@role='button' and contains(., 'Most relevant')]"
+            ]
+
+            for selector in selectors:
+                try:
+                    dropdown = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, selector)))
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown)
+                    random_delay(0.5, 1.5)
+                    driver.execute_script("arguments[0].click();", dropdown)
+                    random_delay(1.5, 3)
+
+                    all_options = [
+                        "//span[text()='All comments']",
+                        "//div[@role='menuitem' and contains(., 'All comments')]"
+                    ]
+                    
+                    for option in all_options:
+                        try:
+                            all_comments = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, option)))
+                            driver.execute_script("arguments[0].click();", all_comments)
+                            random_delay(2, 4)
+                            print("✅ Switched to 'All comments' view")
+                            return True
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+                    
+            if attempt < max_retries - 1:
+                print(f"⚠️ Attempt {attempt+1} to switch to 'All comments' failed. Retrying...")
+                random_delay(2, 3)
+            else:
+                print("⚠️ Could not switch to 'All comments' view")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt + random.uniform(0, 1)
+                print(f"⚠️ Error switching to all comments: {e}. Retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Failed to switch to all comments after {max_retries} attempts")
+
+    return False
+
+# === Step 4: Extract Post Information and Comments ===
+
+def check_layout_type(driver):
+    """Detect if the post is displayed in a popup/modal or regular layout"""
+    try:
+        # Check for modal/popup indicators
+        modal_indicators = [
+            "//div[contains(@class, 'x1ey2m1c') and contains(@class, 'xds687c')]",  # Common modal class
+            "//div[contains(@role, 'dialog')]",  # Dialog role
+            "//div[contains(@aria-modal, 'true')]"  # Aria modal attribute
+        ]
+
+        for indicator in modal_indicators:
+            elements = driver.find_elements(By.XPATH, indicator)
+            if elements and any(element.is_displayed() for element in elements):
+                return "modal"
+        
+        return "regular"
+    except Exception:
+        return "regular"  # Default to regular layout
+
+def extract_post_info(driver):
+    """Extract post description and creation date with improved accuracy for different layouts"""
+    post_info = {
+        "description": "",
+        "date": ""
+    }
+
+    try:
+        # Detect layout type
+        layout = check_layout_type(driver)
+        print(f"📊 Detected layout: {layout}")
+        
+        # Define selectors based on layout
+        if layout == "modal":
+            # Modal/popup layout selectors
+            date_selectors = [
+                "//div[contains(@class, 'x1pi30zi') and contains(@class, 'x1swvt13')]//a//span",
+                "//div[contains(@role, 'dialog')]//span[contains(@class, 'x4k7w5x') and string-length(.) < 30]",
+                "//div[contains(@role, 'dialog')]//span[contains(text(), 'hr') or contains(text(), 'min') or contains(text(), 'd')]",
+                "//div[contains(@aria-modal, 'true')]//a[contains(@href, '/posts/')]//span"
+            ]
+            
+            content_selectors = [
+                "//div[contains(@role, 'dialog')]//div[contains(@class, 'xdj266r') or contains(@class, 'x11i5rnm')]//div[contains(@dir, 'auto')]",
+                "//div[contains(@aria-modal, 'true')]//div[contains(@data-ad-preview, 'message')]",
+                "//div[contains(@role, 'dialog')]//div[contains(@class, 'x1iorvi4') and contains(@class, 'x1pi30zi')]//div[contains(@dir, 'auto')]",
+                # Fallback for any text content in the modal that might be the post
+                "//div[contains(@role, 'dialog')]//div[contains(@dir, 'auto') and string-length(.) > 20]"
+            ]
+        else:
+            # Regular layout selectors
+            date_selectors = [
+                "//a[contains(@href, '/posts/') or contains(@href, '/photos/')]//span[contains(text(), 'hr') or contains(text(), 'min') or contains(text(), 'd') or contains(text(), 'h') or contains(text(), 'Yesterday') or contains(text(), 'Today')]",
+                "//span[contains(@class, 'x4k7w5x') and contains(@class, 'x1lliihq') and string-length(.) < 30]",
+                "//abbr[@class]",
+                "//span[contains(text(), 'Yesterday') or contains(text(), 'Today')]",
+                "//a[contains(@href, 'story') or contains(@href, 'posts')]//span[string-length(.) < 30]"
+            ]
+            
+            content_selectors = [
+                "//div[@data-ad-preview='message']",
+                "//div[contains(@class, 'ecm0bbzt')]//div[contains(@dir, 'auto') and not(contains(@class, 'x78zum5'))]",
+                "//div[@data-ad-comet-preview='message']",
+                "//div[contains(@class, 'xdj266r')]//div[contains(@dir, 'auto')]"
+            ]
+        
+        # Additional shared selectors that might work in both layouts
+        date_selectors.extend([
+            "//span[contains(@class, 'x4k7w5x') and string-length(.) < 30]",
+            "//a[contains(@href, '/videos/')]//span[string-length(.) < 30]"
+        ])
+        
+        content_selectors.extend([
+            "//div[contains(@dir, 'auto') and string-length(.) > 30]",  # Generic selector for longer text
+            "//div[contains(@class, 'x78zum5') and contains(@class, 'x1iyjqo2')]//div[contains(@dir, 'auto')]"  # Another common content class
+        ])
+        
+        # First extract the date
+        for selector in date_selectors:
+            try:
+                date_elements = driver.find_elements(By.XPATH, selector)
+                for date_el in date_elements:
+                    date_text = date_el.text.strip()
+                    
+                    # Check if it looks like a date (short text containing time indicators)
+                    if (date_text 
+                        and len(date_text) < 30 
+                        and not re.search(r'\d+\s+shares?', date_text, re.IGNORECASE)
+                        and not re.search(r'\d+\s+likes?', date_text, re.IGNORECASE)
+                        and not re.search(r'\d+\s+comments?', date_text, re.IGNORECASE)
+                        and not re.match(r'^(Like|Comment|Share|React|Reply|Me gusta|いいね|回應|分享)', date_text, re.IGNORECASE)
+                        and (
+                            re.search(r'\d+\s*(s|m|h|d|w|hr|min|sec|hour|hours|day|days|week|weeks|month|months)', date_text, re.IGNORECASE) or 
+                            re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)', date_text) or
+                            re.search(r'(Yesterday|Today|now)', date_text, re.IGNORECASE)
+                        )):
+
+                        post_info["date"] = date_text
+                        # Convert relative date to actual date
+                        post_info["date"] = convert_relative_date(date_text)
+                        break
+                
+                if post_info["date"]:
+                    break
+            except Exception:
+                continue
+        
+        # Then extract the post content separately
+        for selector in content_selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, selector)
+                for element in elements:
+                    text = element.text.strip()
+                    # Check that this is not the date text and is long enough to be a post
+                    if (text and 
+                        len(text) > 5 and 
+                        text != post_info["date"] and
+                        not re.match(r'^(Like|Comment|Share|React|Reply|Me gusta|いいね|回應|分享)', text, re.IGNORECASE)):
+                        
+                        # Check if text contains UI elements text that isn't part of the actual content
+                        if not re.search(r'(Like\s+·\s+Reply|Comment\s+·\s+Share)', text, re.IGNORECASE):
+                            post_info["description"] = text
+                            break
+                
+                if post_info["description"]:
+                    break
+            except Exception:
+                continue
+        
+        # If still no description, try one last approach with JavaScript
+        if not post_info["description"]:
+            try:
+                # Try to get text content using JavaScript
+                js_content = driver.execute_script("""
+                    // Find all elements with substantial text
+                    const textElements = Array.from(document.querySelectorAll('div[dir="auto"]'))
+                        .filter(el => el.textContent.trim().length > 20 
+                               && !el.textContent.includes('Like') 
+                               && !el.textContent.includes('Comment')
+                               && !el.textContent.includes('Share')
+                               && !el.textContent.includes('Reply'));
+                    
+                    // Sort by text length (descending)
+                    textElements.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length);
+                    
+                    // Return the longest text which is likely the post content
+                    return textElements.length > 0 ? textElements[0].textContent.trim() : '';
+                """)
+                
+                if js_content and len(js_content) > 10:
+                    post_info["description"] = js_content
+            except Exception as e:
+                print(f"⚠️ JavaScript extraction failed: {e}")
+                
+    except Exception as e:
+        print(f"⚠️ Error extracting post info: {e}")
+
+    return post_info
+def extract_username_from_comment_block(container):
+    """Enhanced function to extract usernames from Facebook comment blocks"""
+
+    def clean_user_name(name):
+        # Remove known suffixes like "· Top fan", and trailing time expressions
+        name = re.sub(r'\s*·\s*Top fan.*$', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s*·\s*.*$', '', name)  # Remove anything after dot
+        name = re.sub(r'\s+(a|an|\d+)\s+(second|minute|hour|day|week|month|year)s?\s*(ago)?$', '', name, flags=re.IGNORECASE)
+        return name.strip()
+
+    fallback_paths = [
+        ".//h3[contains(@class, 'x1heor9g')]//a",
+        ".//h3//a",
+        ".//strong//a",
+        ".//a[contains(@href, 'facebook.com/') and not(contains(@href, 'photo.php'))]",
+        ".//a[contains(@href, '/user/')]",
+        ".//span[@class='x3nfvp2']//a",
+        ".//div[contains(@class, 'x1i10hfl')]//a[contains(@href, 'facebook.com')]",
+    ]
+
+    # First try regular paths
+    for path in fallback_paths:
+        try:
+            name_el = container.find_element(By.XPATH, path)
+            user_name = name_el.text.strip()
+            if (user_name and len(user_name) > 1 and 
+                not re.match(r'^\d+\s*[smhdwy]?$', user_name, re.IGNORECASE) and
+                not re.match(r'^(Like|Comment|Share|Reply)', user_name, re.IGNORECASE) and
+                not re.match(r'^\d+$', user_name) and
+                'rishav sinha' not in user_name.lower()):
+                return clean_user_name(user_name)
+        except:
+            continue
+
+    # Second: Try aria-labels
+    try:
+        aria_elements = container.find_elements(By.XPATH, ".//*[contains(@aria-label, 'Comment by')]")
+        for el in aria_elements:
+            aria_label = el.get_attribute('aria-label')
+            if aria_label and 'Comment by' in aria_label:
+                user_name = aria_label.replace('Comment by', '').strip()
+                if (user_name and len(user_name) > 1 and 
+                    not re.match(r'^\d+\s*[smhdwy]?$', user_name, re.IGNORECASE) and
+                    'rishav sinha' not in user_name.lower()):
+                    return clean_user_name(user_name)
+    except:
+        pass
+
+    # Third: Try ancestors
+    try:
+        ancestors = [
+            "./ancestor::div[@aria-label='Comment']",
+            "./ancestor::div[contains(@aria-label, 'Comment by')]",
+            "./ancestor::div[@data-visualcompletion='comment']",
+            "./ancestor::div[@role='article']"
+        ]
+        for ancestor_path in ancestors:
+            try:
+                ancestor = container.find_element(By.XPATH, ancestor_path)
+                for path in fallback_paths:
+                    try:
+                        name_el = ancestor.find_element(By.XPATH, path)
+                        user_name = name_el.text.strip()
+                        if (user_name and len(user_name) > 1 and 
+                            not re.match(r'^\d+\s*[smhdwy]?$', user_name, re.IGNORECASE) and
+                            not re.match(r'^(Like|Comment|Share|Reply)', user_name, re.IGNORECASE) and
+                            'rishav sinha' not in user_name.lower()):
+                            return clean_user_name(user_name)
+                    except:
+                        continue
+                try:
+                    aria_label = ancestor.get_attribute('aria-label')
+                    if aria_label and 'Comment by' in aria_label:
+                        user_name = aria_label.replace('Comment by', '').strip()
+                        if (user_name and len(user_name) > 1 and 
+                            not re.match(r'^\d+\s*[smhdwy]?$', user_name, re.IGNORECASE) and
+                            'rishav sinha' not in user_name.lower()):
+                            return clean_user_name(user_name)
+                except:
+                    pass
+            except:
+                continue
+    except:
+        pass
+
+    # Fourth: JavaScript-based fallback
+    try:
+        user_name = driver.execute_script("""
+            try {
+                var container = arguments[0];
+                var nameLink = container.querySelector('h3 a');
+                if (nameLink && nameLink.textContent.trim().length > 0 &&
+                    !/^\\d+\\s*[smhdwy]?$/i.test(nameLink.textContent.trim()) &&
+                    !/^(Like|Comment|Share|Reply)/i.test(nameLink.textContent.trim())) {
+                    return nameLink.textContent.trim().split('·')[0].trim();
+                }
+                var possibleNameLinks = container.querySelectorAll('a[href*="facebook.com"]:not([href*="photo.php"])');
+                for (var i = 0; i < possibleNameLinks.length; i++) {
+                    var link = possibleNameLinks[i];
+                    var text = link.textContent.trim();
+                    if (text.length > 1 &&
+                        !/^\\d+\\s*[smhdwy]?$/i.test(text) &&
+                        !/^(Like|Comment|Share|Reply)/i.test(text) &&
+                        text.length < 50) {
+                        return text.split('·')[0].trim();
+                    }
+                }
+                var article = container.closest('[role="article"]');
+                if (article) {
+                    if (article.getAttribute('aria-label') &&
+                        article.getAttribute('aria-label').includes('Comment by')) {
+                        var name = article.getAttribute('aria-label').replace('Comment by', '').trim();
+                        if (name.length > 1 && !/^\\d+\\s*[smhdwy]?$/i.test(name)) {
+                            return name;
+                        }
+                    }
+                    var nameLink = article.querySelector('h3 a, a[role="link"]');
+                    if (nameLink && nameLink.textContent.trim().length > 0 &&
+                        !/^\\d+\\s*[smhdwy]?$/i.test(nameLink.textContent.trim())) {
+                        return nameLink.textContent.trim().split('·')[0].trim();
+                    }
+                }
+            } catch (e) {
+                return null;
+            }
+            return null;
+        """, container)
+        if (user_name and len(user_name) > 1 and 
+            not re.match(r'^\d+\s*[smhdwy]?$', user_name, re.IGNORECASE) and
+            'rishav sinha' not in user_name.lower()):
+            return clean_user_name(user_name)
+    except:
+        pass
+
+    return ""
+
+
+def extract_comments(post_url):
+    """Final version: clean, accurate, complete, and faithful to original logic"""
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            # 🧹 Close leftover modal
+            try:
+                close_btn = driver.find_element(By.XPATH, "//div[@aria-label='Close' or @aria-label='Close dialog']")
+                if close_btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", close_btn)
+                    time.sleep(2)
+            except:
+                pass
+
+            driver.get(post_url)
+            random_delay(5, 8)
+
+            for _ in range(3):
+                driver.execute_script("window.scrollTo(0, window.scrollY + 500);")
+                random_delay(1, 2)
+
+            post_info = extract_post_info(driver)
+            if post_info['description']:
+                print(f"📝 Post description: {post_info['description'][:100]}...")
+            if post_info['date']:
+                print(f"📅 Post date: {post_info['date']}")
+
+            switch_to_all_comments(driver)
+            expand_comments(driver)
+
+            comments_data = []
+            selectors = [
+                "//div[contains(@aria-label, 'Comment by')]",
+                "//div[@data-ad-comet-preview='message']",
+                "//div[contains(@class, 'ecm0bbzt') and contains(@class, 'hv4rvrfc')]",
+                "//div[@role='article']//div[contains(@dir, 'auto')]",
+                "//div[contains(@class, 'x1lliihq') and contains(@class, 'x6ikm8r') and contains(@class, 'x10wlt62')]",
+                "//ul[contains(@class, 'x78zum5')]//div[contains(@dir, 'auto')]",
+                "//div[@aria-label='Comment']",
+                "//div[@data-visualcompletion='comment']",
+                "//div[@data-pagelet='Comment']"
+            ]
+
+            comment_elements = []
+            for selector in selectors:
+                elements = driver.find_elements(By.XPATH, selector)
+                if elements:
+                    comment_elements = elements
+                    print(f"✅ Found {len(comment_elements)} comments using selector: {selector}")
+                    break
+
+            for el in comment_elements:
+                try:
+                    # Get the actual comment text from the inner block
+                    text_el = el.find_element(By.XPATH, ".//div[contains(@dir, 'auto')]")
+                    text = text_el.text.strip()
+
+                    # Clean UI noise
+                    text = re.sub(r'\b(Like|Reply|Edited|See translation|Top fan|View translation)\b', '', text, flags=re.IGNORECASE)
+                    text = re.sub(r'\s+·\s+', ' ', text)
+                    text = re.sub(r'\n?\d+\s*[smhdw]?\s*$', '', text, flags=re.IGNORECASE)
+                    text = re.sub(r'(\n)?\d+\s*$', '', text)
+                    text = text.strip()
+
+                    # Get username
+                    user_name = extract_username_from_comment_block(el)
+
+                    # If the comment starts with the name, strip it
+                    if user_name and text.lower().startswith(user_name.lower()):
+                        text = text[len(user_name):].strip()
+
+                    if text and len(text) > 3 and 'rishav sinha' not in user_name.lower():
+                        comments_data.append({
+                            "user_name": user_name,
+                            "comment_text": text
+                        })
+                except Exception:
+                    continue
+
+            if comments_data:
+                return {
+                    "post_info": post_info,
+                    "comments": comments_data
+                }
+
+            if attempt < max_retries - 1:
+                print(f"⚠️ No comments extracted on attempt {attempt+1}. Retrying...")
+                random_delay(5, 8)
+            else:
+                print("❌ Failed to extract comments after all attempts")
+                return {
+                    "post_info": post_info,
+                    "comments": []
+                }
+
+        except Exception as e:
+            wait_time = 2 ** attempt + random.uniform(0, 1)
+            if attempt < max_retries - 1:
+                print(f"⚠️ Error on attempt {attempt+1}: {e}. Retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ All {max_retries} attempts failed: {e}")
+                return {
+                    "post_info": {"description": "", "date": ""},
+                    "comments": []
+                }
+
+    return {
+        "post_info": {"description": "", "date": ""},
+        "comments": []
+    }
+
+# === Step 5: Run the Process ===
+
+output_dir = r"C:\Users\rzzzc\BFARPy\Python\4th Sem\facebook_scraping"
+json_path = output_dir + r"\facebook_comments_enhanced.json"
+txt_path = output_dir + r"\facebook_comments_enhanced.txt"
+csv_path = output_dir + r"\facebook_comments_enhanced.csv"
+
+# Initialize collections
+
+all_data = {}
+failed_urls = {}
+total_comments = 0
+all_comments_list = []  # For CSV export
+
+# Process URLs
+
+for i, url in enumerate(urls):
+    print(f"\n[{i+1}/{len(urls)}] Processing: {url}")
+
+    try:
+        # Add random delay between requests
+        if i > 0:
+            delay = random_delay(3, 7)
+            print(f"⏱️ Waiting {delay:.2f}s before next request...")
+        
+        # Extract data
+        data = extract_comments(url)
+        
+        # Process results
+        post_info = data["post_info"]
+        comments = data["comments"]
+        
+        all_data[url] = {
+            "post_info": post_info,
+            "comments": comments
+        }
+        
+        print(f"✅ Extracted {len(comments)} comments")
+        total_comments += len(comments)
+        
+        # Add to CSV list
+        for comment in comments:
+            all_comments_list.append({
+                "post_url": url,
+                "post_date": post_info["date"],
+                "post_description": post_info["description"],
+                "user_name": comment["user_name"],
+                "comment_text": comment["comment_text"]
+            })
+        
+        if not comments:
+            failed_urls[url] = "No comments extracted"
+        
+        # Show sample
+        if comments:
+            print("📋 Sample comments:")
+            for j, comment in enumerate(comments[:3]):
+                # Truncate display but store full text
+                display_comment = comment['comment_text']
+                if len(display_comment) > 80:
+                    display_comment = f"{display_comment[:80]}..."
+                print(f"{j+1}. {comment['user_name']}: {display_comment}")
+        
+        # Save progress periodically
+        if (i + 1) % 3 == 0 or (i + 1) == len(urls):
+            print("💾 Saving progress...")
+            
+            # Save JSON
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(all_data, f, indent=2, ensure_ascii=False)
+            
+            # Save TXT
+            with open(txt_path, "w", encoding="utf-8") as f:
+                for url_saved, data_saved in all_data.items():
+                    post_info = data_saved["post_info"]
+                    comments = data_saved["comments"]
+                    
+                    f.write(f"Post URL: {url_saved}\n")
+                    f.write(f"Post Date: {post_info['date']}\n")
+                    f.write(f"Post Description: {post_info['description']}\n")
+                    f.write(f"Total Comments: {len(comments)}\n\n")
+                    
+                    for k, comment in enumerate(comments):
+                        f.write(f"Comment {k+1} by {comment['user_name']}:\n{comment['comment_text']}\n\n")
+                    
+                    f.write("\n" + "-"*50 + "\n\n")
+            
+            # Save CSV
+            if all_comments_list:
+                df_comments = pd.DataFrame(all_comments_list)
+                df_comments.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    
+    except Exception as e:
+        print(f"❌ Error processing URL {url}: {e}")
+        failed_urls[url] = str(e)
+        
+        # Save progress in case of error
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(all_data, f, indent=2, ensure_ascii=False)
+
+# === Step 6: Final Report and Cleanup ===
+
+print("\n" + "="*50)
+print(f"✅ Scraping complete! Processed {len(urls)} URLs")
+print(f"📊 Total comments extracted: {total_comments}")
+print(f"⚠️ Failed URLs: {len(failed_urls)}")
+
+if failed_urls:
+    print("\nFailed URLs and reasons:")
+    for failed_url, reason in failed_urls.items():
+        print(f"- {failed_url}: {reason}")
+
+# Save final output
+
+print(f"\n💾 Final data saved to:")
+print(f"- JSON: {json_path}")
+print(f"- TXT: {txt_path}")
+print(f"- CSV: {csv_path}")
+
+# Close the driver
+
+driver.quit()
+print("\n👋 Script finished!")

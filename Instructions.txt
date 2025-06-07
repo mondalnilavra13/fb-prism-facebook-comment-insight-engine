@@ -1,0 +1,8 @@
+1. "video_url" only contains url for video posts that open in full screen. "sorted_facebook_url" has only normal posts(not videos) and they open     in modal view. In excel file (1-164) contains posts from 1st jan,2025 and later..(165-756) are older posts from 2024.
+
+2."2025_url_comment_fetching" is the output csv file that contains comments from url(1-164) i.e 2025 and "facebook_comments_2024" is the output csv file that contains comments from url(165-756).Here the input file is "sorted_facebook_url"
+
+3.Sentiment analysis is done only on relevant and newer data i.e posts from 2025("2025_url_comment_fetching.csv") and the result of sentiment analysis is stored in "comments_sentiment_topic" file. There is also a "analysis_summary" txt file which contains overview of entire sentiment analysis. It tells us the total number of positive,negative and neutral sentiments and and the list of categories detected.
+
+
+4.We also have a "topic_categorisation" file which is used as a dictionary for topic categorisation 
